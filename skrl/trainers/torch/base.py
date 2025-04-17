@@ -1,3 +1,4 @@
+from icecream import ic
 from typing import List, Optional, Union
 
 import atexit
@@ -85,6 +86,8 @@ class Trainer:
         if config.torch.is_distributed:
             if config.torch.rank:
                 self.disable_progressbar = True
+
+        self.episode_counter = 0
 
     def __str__(self) -> str:
         """Generate a string representation of the trainer
@@ -190,10 +193,13 @@ class Trainer:
 
             with torch.no_grad():
                 # compute actions
-                actions = self.agents.act(states, timestep=timestep, timesteps=self.timesteps)[0]
+                actions, log_probs, outputs = self.agents.act(states, timestep=timestep, timesteps=self.timesteps)
+
 
                 # step the environments
                 next_states, rewards, terminated, truncated, infos = self.env.step(actions)
+                
+                self.episode_counter += terminated.sum()
 
                 # render scene
                 if not self.headless:
@@ -219,7 +225,7 @@ class Trainer:
                             self.agents.track_data(f"Info / {k}", v.item())
 
             # post-interaction
-            self.agents.post_interaction(timestep=timestep, timesteps=self.timesteps)
+            self.agents.post_interaction(timestep=timestep, timesteps=self.timesteps, episode_counter=self.episode_counter.cpu().numpy())
 
             # reset environments
             if self.env.num_envs > 1:
@@ -286,7 +292,7 @@ class Trainer:
                             self.agents.track_data(f"Info / {k}", v.item())
 
             # post-interaction
-            super(type(self.agents), self.agents).post_interaction(timestep=timestep, timesteps=self.timesteps)
+            super(type(self.agents), self.agents).post_interaction(timestep=timestep, timesteps=self.timesteps, episode_counter=self.episode_counter)
 
             # reset environments
             if self.env.num_envs > 1:

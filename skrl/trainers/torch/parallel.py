@@ -71,7 +71,18 @@ def fn_processor(process_index, *args):
                 _actions = _outputs[0] if stochastic_evaluation else _outputs[-1].get("mean_actions", _outputs[0])
                 if not _actions.is_cuda:
                     _actions.share_memory_()
-                queue.put(_actions)
+
+            
+                ##################### ADDED #####################
+                result = {
+                    "actions": _actions,
+                    "net_output": _outputs["net_output"],
+                }
+                queue.put(result)
+                #################################################
+
+
+                # queue.put(_actions)
                 barrier.wait()
 
         # record agent's experience
@@ -137,10 +148,13 @@ class ParallelTrainer(Trainer):
         """
         _cfg = copy.deepcopy(PARALLEL_TRAINER_DEFAULT_CONFIG)
         _cfg.update(cfg if cfg is not None else {})
+        self._cfg = _cfg
         agents_scope = agents_scope if agents_scope is not None else []
         super().__init__(env=env, agents=agents, agents_scope=agents_scope, cfg=_cfg)
 
         mp.set_start_method(method="spawn", force=True)
+        self.finished_counter = 0 
+        print("LAUNCHING PARALLEL TRAINER")
 
     def train(self) -> None:
         """Train the agents in parallel
@@ -164,7 +178,7 @@ class ParallelTrainer(Trainer):
 
         # non-simultaneous agents
         if self.num_simultaneous_agents == 1:
-            self.agents.init(trainer_cfg=self.cfg)
+            self.agents.init(trainer_cfg=self.cfg, idle_task_id = self._cfg["idle_task_id"])
             # single-agent
             if self.env.num_agents == 1:
                 self.single_agent_train()
@@ -172,6 +186,7 @@ class ParallelTrainer(Trainer):
             else:
                 self.multi_agent_train()
             return
+        
 
         # initialize multiprocessing variables
         queues = []
@@ -213,6 +228,7 @@ class ParallelTrainer(Trainer):
 
         # reset env
         states, infos = self.env.reset()
+
         if not states.is_cuda:
             states.share_memory_()
 
@@ -228,14 +244,29 @@ class ParallelTrainer(Trainer):
             # compute actions
             with torch.no_grad():
                 for pipe, queue in zip(producer_pipes, queues):
-                    pipe.send({"task": "act", "timestep": timestep, "timesteps": self.timesteps})
+                    pipe.send({"task": "act", "timestep": timestep, "timesteps": self.timesteps })
                     queue.put(states)
 
                 barrier.wait()
-                actions = torch.vstack([queue.get() for queue in queues])
+
+                #actions = torch.vstack([queue.get() for queue in queues])
+
+                ############# ADDED #############
+                results = [queue.get() for queue in queues]
+                actions = torch.vstack([result["actions"] for result in results])
+                net_output = [result["net_output"] for result in results]
+                #################################
+
+                self.env.set_latest_net_output(net_output)
+
+                print("[INFO] seeting latest net output", flush =True)
+
 
                 # step the environments
                 next_states, rewards, terminated, truncated, infos = self.env.step(actions)
+
+                self.finished_counter += (terminated) or truncated
+
 
                 # render scene
                 if not self.headless:
@@ -301,7 +332,7 @@ class ParallelTrainer(Trainer):
 
         # non-simultaneous agents
         if self.num_simultaneous_agents == 1:
-            self.agents.init(trainer_cfg=self.cfg)
+            self.agents.init(trainer_cfg=self.cfg, idle_task_id = self._cfg["idle_task_id"])
             # single-agent
             if self.env.num_agents == 1:
                 self.single_agent_eval()

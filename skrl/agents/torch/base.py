@@ -176,6 +176,7 @@ class Agent:
             self.checkpoint_interval = int(trainer_cfg.get("timesteps", 0) / 10)
         if self.checkpoint_interval > 0:
             os.makedirs(os.path.join(self.experiment_dir, "checkpoints"), exist_ok=True)
+        
 
     def track_data(self, tag: str, value: float) -> None:
         """Track data to TensorBoard
@@ -189,7 +190,7 @@ class Agent:
         """
         self.tracking_data[tag].append(value)
 
-    def write_tracking_data(self, timestep: int, timesteps: int) -> None:
+    def write_tracking_data(self, timestep: int, timesteps: int, episode_counter: int) -> None:
         """Write tracking data to TensorBoard
 
         :param timestep: Current timestep
@@ -197,13 +198,25 @@ class Agent:
         :param timesteps: Number of timesteps
         :type timesteps: int
         """
+        #for k, v in self.tracking_data.items():
+            #if k.endswith("(min)"):
+                #self.writer.add_scalar(k, np.min(v), timestep)
+            #elif k.endswith("(max)"):
+                #self.writer.add_scalar(k, np.max(v), timestep)
+            #else:
+                #self.writer.add_scalar(k, np.mean(v), timestep)
+        
         for k, v in self.tracking_data.items():
             if k.endswith("(min)"):
-                self.writer.add_scalar(k, np.min(v), timestep)
+                self.writer.add_scalar(k, np.min(v), episode_counter)
             elif k.endswith("(max)"):
-                self.writer.add_scalar(k, np.max(v), timestep)
+                self.writer.add_scalar(k, np.max(v), episode_counter)
             else:
-                self.writer.add_scalar(k, np.mean(v), timestep)
+                self.writer.add_scalar(k, np.mean(v), episode_counter)
+
+
+
+        
         # reset data containers for next iteration
         self._track_rewards.clear()
         self._track_timesteps.clear()
@@ -280,6 +293,7 @@ class Agent:
         infos: Any,
         timestep: int,
         timesteps: int,
+
     ) -> None:
         """Record an environment transition in memory (to be implemented by the inheriting classes)
 
@@ -318,9 +332,23 @@ class Agent:
             finished_episodes = (terminated + truncated).nonzero(as_tuple=False)
             if finished_episodes.numel():
 
+                finished_rewards = self._cumulative_rewards[finished_episodes].clone()
+
                 # storage cumulative rewards and timesteps
                 self._track_rewards.extend(self._cumulative_rewards[finished_episodes][:, 0].reshape(-1).tolist())
                 self._track_timesteps.extend(self._cumulative_timesteps[finished_episodes][:, 0].reshape(-1).tolist())
+
+                # Calculate average feasible reward: episodes that terminated (feasible) vs. truncated ones
+                # Extract the subset of finished episodes that are terminated and not truncated
+                feasible_flags = (terminated[finished_episodes].bool() & (~truncated[finished_episodes].bool()))
+                if feasible_flags.any():
+                    feasible_rewards = finished_rewards[feasible_flags].reshape(-1)
+                    min_feasible_reward = feasible_rewards.min().item()
+                    avg_feasible_reward = feasible_rewards.mean().item()
+                    max_feasible_reward = feasible_rewards.max().item()
+                    self.tracking_data["Reward / Feasible total reward (max)"].append(max_feasible_reward)
+                    self.tracking_data["Reward / Feasible total reward (min)"].append(min_feasible_reward)
+                    self.tracking_data["Reward / Feasible total reward (mean)"].append(avg_feasible_reward)
 
                 # reset the cumulative rewards and timesteps
                 self._cumulative_rewards[finished_episodes] = 0
@@ -652,7 +680,7 @@ class Agent:
         """
         pass
 
-    def post_interaction(self, timestep: int, timesteps: int) -> None:
+    def post_interaction(self, timestep: int, timesteps: int, episode_counter:int) -> None:
         """Callback called after the interaction with the environment
 
         :param timestep: Current timestep
@@ -678,7 +706,7 @@ class Agent:
 
         # write to tensorboard
         if timestep > 1 and self.write_interval > 0 and not timestep % self.write_interval:
-            self.write_tracking_data(timestep, timesteps)
+            self.write_tracking_data(timestep, timesteps, episode_counter)
 
     def _update(self, timestep: int, timesteps: int) -> None:
         """Algorithm's main update step

@@ -78,6 +78,7 @@ class PPO(Agent):
         action_space: Optional[Union[int, Tuple[int], gymnasium.Space]] = None,
         device: Optional[Union[str, torch.device]] = None,
         cfg: Optional[dict] = None,
+        idle_task_id = 8,
     ) -> None:
         """Proximal Policy Optimization (PPO)
 
@@ -196,7 +197,7 @@ class PPO(Agent):
         else:
             self._value_preprocessor = self._empty_preprocessor
 
-    def init(self, trainer_cfg: Optional[Mapping[str, Any]] = None) -> None:
+    def init(self, idle_task_id, trainer_cfg: Optional[Mapping[str, Any]] = None  ) -> None:
         """Initialize the agent"""
         super().init(trainer_cfg=trainer_cfg)
         self.set_mode("eval")
@@ -220,6 +221,11 @@ class PPO(Agent):
         self._current_log_prob = None
         self._current_next_states = None
 
+
+        ############### ADDED #######################################
+        self.idle_task_id = idle_task_id
+        self.idle_counter = 0
+
     def act(self, states: torch.Tensor, timestep: int, timesteps: int) -> torch.Tensor:
         """Process the environment's states to make a decision (actions) using the main policy
 
@@ -242,6 +248,8 @@ class PPO(Agent):
         with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
             actions, log_prob, outputs = self.policy.act({"states": self._state_preprocessor(states)}, role="policy")
             self._current_log_prob = log_prob
+
+
 
         return actions, log_prob, outputs
 
@@ -331,7 +339,7 @@ class PPO(Agent):
         """
         pass
 
-    def post_interaction(self, timestep: int, timesteps: int) -> None:
+    def post_interaction(self, timestep: int, timesteps: int, episode_counter: int) -> None:
         """Callback called after the interaction with the environment
 
         :param timestep: Current timestep
@@ -346,7 +354,7 @@ class PPO(Agent):
             self.set_mode("eval")
 
         # write tracking data and checkpoints
-        super().post_interaction(timestep, timesteps)
+        super().post_interaction(timestep, timesteps, episode_counter)
 
     def _update(self, timestep: int, timesteps: int) -> None:
         """Algorithm's main update step
@@ -433,6 +441,7 @@ class PPO(Agent):
         cumulative_policy_loss = 0
         cumulative_entropy_loss = 0
         cumulative_value_loss = 0
+        cumulative_values = 0 
 
         # learning epochs
         for epoch in range(self._learning_epochs):
@@ -451,6 +460,7 @@ class PPO(Agent):
                 with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
 
                     sampled_states = self._state_preprocessor(sampled_states, train=not epoch)
+
 
                     _, next_log_prob, _ = self.policy.act(
                         {"states": sampled_states, "taken_actions": sampled_actions}, role="policy"
@@ -514,6 +524,8 @@ class PPO(Agent):
                 # update cumulative losses
                 cumulative_policy_loss += policy_loss.item()
                 cumulative_value_loss += value_loss.item()
+                cumulative_values += predicted_values.mean().item()
+
                 if self._entropy_loss_scale:
                     cumulative_entropy_loss += entropy_loss.item()
 
@@ -532,6 +544,7 @@ class PPO(Agent):
         # record data
         self.track_data("Loss / Policy loss", cumulative_policy_loss / (self._learning_epochs * self._mini_batches))
         self.track_data("Loss / Value loss", cumulative_value_loss / (self._learning_epochs * self._mini_batches))
+        self.track_data("Value / Predicted values", cumulative_values / (self._learning_epochs * self._mini_batches))
         if self._entropy_loss_scale:
             self.track_data(
                 "Loss / Entropy loss", cumulative_entropy_loss / (self._learning_epochs * self._mini_batches)
