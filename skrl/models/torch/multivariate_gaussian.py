@@ -117,6 +117,7 @@ class MultivariateGaussianMixin:
         if self._mg_clip_log_std:
             log_std = torch.clamp(log_std, self._mg_log_std_min, self._mg_log_std_max)
 
+
         self._mg_log_std = log_std
         self._mg_num_samples = mean_actions.shape[0]
 
