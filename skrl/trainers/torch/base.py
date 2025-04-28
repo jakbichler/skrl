@@ -198,8 +198,6 @@ class Trainer:
 
                 # step the environments
                 next_states, rewards, terminated, truncated, infos = self.env.step(actions)
-                
-                self.episode_counter += terminated.sum()
 
                 # render scene
                 if not self.headless:
@@ -225,7 +223,7 @@ class Trainer:
                             self.agents.track_data(f"Info / {k}", v.item())
 
             # post-interaction
-            self.agents.post_interaction(timestep=timestep, timesteps=self.timesteps, episode_counter=self.episode_counter.cpu().numpy())
+            self.agents.post_interaction(timestep=timestep, timesteps=self.timesteps, episode_counter=self.episode_counter)
 
             # reset environments
             if self.env.num_envs > 1:

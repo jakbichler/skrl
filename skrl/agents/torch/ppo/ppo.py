@@ -1,18 +1,20 @@
-import copy
-import itertools
 from typing import Any, Mapping, Optional, Tuple, Union
 
+import copy
+import itertools
 import gymnasium
+from packaging import version
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from packaging import version
 
 from skrl import config, logger
 from skrl.agents.torch import Agent
 from skrl.memories.torch import Memory
 from skrl.models.torch import Model
 from skrl.resources.schedulers.torch import KLAdaptiveLR
+
 
 # fmt: off
 # [start-config-dict-torch]
@@ -76,7 +78,7 @@ class PPO(Agent):
         action_space: Optional[Union[int, Tuple[int], gymnasium.Space]] = None,
         device: Optional[Union[str, torch.device]] = None,
         cfg: Optional[dict] = None,
-        idle_task_id=8,
+        idle_task_id = 8,
     ) -> None:
         """Proximal Policy Optimization (PPO)
 
@@ -121,7 +123,7 @@ class PPO(Agent):
 
         # broadcast models' parameters in distributed runs
         if config.torch.is_distributed:
-            logger.info("Broadcasting models' parameters")
+            logger.info(f"Broadcasting models' parameters")
             if self.policy is not None:
                 self.policy.broadcast_parameters()
                 if self.value is not None and self.policy is not self.value:
@@ -163,9 +165,7 @@ class PPO(Agent):
         # set up automatic mixed precision
         self._device_type = torch.device(device).type
         if version.parse(torch.__version__) >= version.parse("2.4"):
-            self.scaler = torch.amp.GradScaler(
-                device=self._device_type, enabled=self._mixed_precision
-            )
+            self.scaler = torch.amp.GradScaler(device=self._device_type, enabled=self._mixed_precision)
         else:
             self.scaler = torch.cuda.amp.GradScaler(enabled=self._mixed_precision)
 
@@ -175,8 +175,7 @@ class PPO(Agent):
                 self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self._learning_rate)
             else:
                 self.optimizer = torch.optim.Adam(
-                    itertools.chain(self.policy.parameters(), self.value.parameters()),
-                    lr=self._learning_rate,
+                    itertools.chain(self.policy.parameters(), self.value.parameters()), lr=self._learning_rate
                 )
             if self._learning_rate_scheduler is not None:
                 self.scheduler = self._learning_rate_scheduler(
@@ -187,31 +186,26 @@ class PPO(Agent):
 
         # set up preprocessors
         if self._state_preprocessor:
-            self._state_preprocessor = self._state_preprocessor(
-                **self.cfg["state_preprocessor_kwargs"]
-            )
+            self._state_preprocessor = self._state_preprocessor(**self.cfg["state_preprocessor_kwargs"])
             self.checkpoint_modules["state_preprocessor"] = self._state_preprocessor
         else:
             self._state_preprocessor = self._empty_preprocessor
 
         if self._value_preprocessor:
-            self._value_preprocessor = self._value_preprocessor(
-                **self.cfg["value_preprocessor_kwargs"]
-            )
+            self._value_preprocessor = self._value_preprocessor(**self.cfg["value_preprocessor_kwargs"])
             self.checkpoint_modules["value_preprocessor"] = self._value_preprocessor
         else:
             self._value_preprocessor = self._empty_preprocessor
 
-    def init(self, idle_task_id, trainer_cfg: Optional[Mapping[str, Any]] = None) -> None:
+    def init(self, idle_task_id, trainer_cfg: Optional[Mapping[str, Any]] = None  ) -> None:
         """Initialize the agent"""
         super().init(trainer_cfg=trainer_cfg)
         self.set_mode("eval")
 
         # create tensors in memory
+        num_robots = self.observation_space["robot_features"].shape[0]
         if self.memory is not None:
-            self.memory.create_tensor(
-                name="states", size=self.observation_space, dtype=torch.float32
-            )
+            self.memory.create_tensor(name="states", size=self.observation_space, dtype=torch.float32)
             self.memory.create_tensor(name="actions", size=self.action_space, dtype=torch.float32)
             self.memory.create_tensor(name="rewards", size=1, dtype=torch.float32)
             self.memory.create_tensor(name="terminated", size=1, dtype=torch.bool)
@@ -220,20 +214,15 @@ class PPO(Agent):
             self.memory.create_tensor(name="values", size=1, dtype=torch.float32)
             self.memory.create_tensor(name="returns", size=1, dtype=torch.float32)
             self.memory.create_tensor(name="advantages", size=1, dtype=torch.float32)
+            self.memory.create_tensor(name="available_robot_mask", size=(num_robots,), dtype=torch.bool)
 
             # tensors sampled during training
-            self._tensors_names = [
-                "states",
-                "actions",
-                "log_prob",
-                "values",
-                "returns",
-                "advantages",
-            ]
+            self._tensors_names = ["states", "actions", "log_prob", "values", "returns", "advantages", "available_robot_mask"]
 
         # create temporary variables needed for storage and computation
         self._current_log_prob = None
         self._current_next_states = None
+
 
         ############### ADDED #######################################
         self.idle_task_id = idle_task_id
@@ -255,16 +244,14 @@ class PPO(Agent):
         # sample random actions
         # TODO, check for stochasticity
         if timestep < self._random_timesteps:
-            return self.policy.random_act(
-                {"states": self._state_preprocessor(states)}, role="policy"
-            )
+            return self.policy.random_act({"states": self._state_preprocessor(states)}, role="policy")
 
         # sample stochastic actions
         with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
-            actions, log_prob, outputs = self.policy.act(
-                {"states": self._state_preprocessor(states)}, role="policy"
-            )
+            actions, log_prob, outputs = self.policy.act({"states": self._state_preprocessor(states)}, role="policy")
             self._current_log_prob = log_prob
+
+
 
         return actions, log_prob, outputs
 
@@ -305,6 +292,11 @@ class PPO(Agent):
             states, actions, rewards, next_states, terminated, truncated, infos, timestep, timesteps
         )
 
+        available_robot_mask = infos["available_robot_mask"]
+        if available_robot_mask is not None:
+            available_robot_mask = torch.tensor(available_robot_mask, device=self.device, dtype=torch.bool)
+
+
         if self.memory is not None:
             self._current_next_states = next_states
 
@@ -314,14 +306,34 @@ class PPO(Agent):
 
             # compute values
             with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
-                values, _, _ = self.value.act(
-                    {"states": self._state_preprocessor(states)}, role="value"
-                )
+                values, _, _ = self.value.act({"states": self._state_preprocessor(states)}, role="value")
                 values = self._value_preprocessor(values, inverse=True)
 
             # time-limit (truncation) bootstrapping
             if self._time_limit_bootstrap:
                 rewards += self._discount_factor * values * truncated
+
+            # ------------------------------------------------------------------
+            # 3. masked log-prob -> only available robots should contribute to the update 
+            # ------------------------------------------------------------------
+            with torch.no_grad(), torch.autocast(device_type=self._device_type,
+                                                enabled=self._mixed_precision):
+                dist = self.policy.distribution(role="policy")
+
+                # element-wise log-prob  →  [B, R, T]
+                lp_matrix = self.policy.log_prob_matrix(dist, actions)
+
+                # apply mask (expand to tasks dim) and sum to  [B,1]
+                lp_masked = (lp_matrix *
+                            available_robot_mask.unsqueeze(-1)).sum(dim=(1, 2)).unsqueeze(-1)
+                
+
+            print((f"Mask {available_robot_mask}"))
+            print(f"LP MATRIX : {lp_matrix}")
+            print((f"Log prob {lp_masked}"))
+
+
+            self._current_log_prob = lp_masked  
 
             # storage transition in memory
             self.memory.add_samples(
@@ -331,8 +343,9 @@ class PPO(Agent):
                 next_states=next_states,
                 terminated=terminated,
                 truncated=truncated,
-                log_prob=self._current_log_prob,
+                log_prob=lp_masked,
                 values=values,
+                available_robot_mask=available_robot_mask,
             )
             for memory in self.secondary_memories:
                 memory.add_samples(
@@ -342,8 +355,9 @@ class PPO(Agent):
                     next_states=next_states,
                     terminated=terminated,
                     truncated=truncated,
-                    log_prob=self._current_log_prob,
+                    log_prob=lp_masked,
                     values=values,
+                    available_robot_mask=available_robot_mask,
                 )
 
     def pre_interaction(self, timestep: int, timesteps: int) -> None:
@@ -419,9 +433,7 @@ class PPO(Agent):
                 advantage = (
                     rewards[i]
                     - values[i]
-                    + discount_factor
-                    * not_dones[i]
-                    * (next_values + lambda_coefficient * advantage)
+                    + discount_factor * not_dones[i] * (next_values + lambda_coefficient * advantage)
                 )
                 advantages[i] = advantage
             # returns computation
@@ -431,15 +443,12 @@ class PPO(Agent):
 
             return returns, advantages
 
+
         # compute returns and advantages
-        with (
-            torch.no_grad(),
-            torch.autocast(device_type=self._device_type, enabled=self._mixed_precision),
-        ):
+        with torch.no_grad(), torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
             self.value.train(False)
             last_values, _, _ = self.value.act(
-                {"states": self._state_preprocessor(self._current_next_states.float())},
-                role="value",
+                {"states": self._state_preprocessor(self._current_next_states.float())}, role="value"
             )
             self.value.train(True)
             last_values = self._value_preprocessor(last_values, inverse=True)
@@ -447,8 +456,7 @@ class PPO(Agent):
         values = self.memory.get_tensor_by_name("values")
         returns, advantages = compute_gae(
             rewards=self.memory.get_tensor_by_name("rewards"),
-            dones=self.memory.get_tensor_by_name("terminated")
-            | self.memory.get_tensor_by_name("truncated"),
+            dones=self.memory.get_tensor_by_name("terminated") | self.memory.get_tensor_by_name("truncated"),
             values=values,
             next_values=last_values,
             discount_factor=self._discount_factor,
@@ -460,14 +468,12 @@ class PPO(Agent):
         self.memory.set_tensor_by_name("advantages", advantages)
 
         # sample mini-batches from memory
-        sampled_batches = self.memory.sample_all(
-            names=self._tensors_names, mini_batches=self._mini_batches
-        )
+        sampled_batches = self.memory.sample_all(names=self._tensors_names, mini_batches=self._mini_batches)
 
         cumulative_policy_loss = 0
         cumulative_entropy_loss = 0
         cumulative_value_loss = 0
-        cumulative_values = 0
+        cumulative_values = 0 
 
         # learning epochs
         for epoch in range(self._learning_epochs):
@@ -481,30 +487,44 @@ class PPO(Agent):
                 sampled_values,
                 sampled_returns,
                 sampled_advantages,
+                sampled_available_robot_mask,
             ) in sampled_batches:
+
                 with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
+
                     sampled_states = self._state_preprocessor(sampled_states, train=not epoch)
 
-                    _, next_log_prob, _ = self.policy.act(
-                        {"states": sampled_states, "taken_actions": sampled_actions}, role="policy"
+                    mu, log_std, _ = self.policy.compute(
+                        {"states": sampled_states}, "policy"
+                    )                                            # mu: [B, D], log_std: [B, D] or [D]
+                    std = log_std.exp()                          # [B, D]
+                    cov_tril = torch.diag_embed(std)             # [B, D, D]
+                    dist_new = torch.distributions.MultivariateNormal(
+                        loc=mu, scale_tril=cov_tril
                     )
+
+                    # per‐dim log‐prob → [B, R, A]
+                    lp_new = self.policy.log_prob_matrix(dist_new, sampled_actions)
+
+                    mask = sampled_available_robot_mask.unsqueeze(-1).expand_as(lp_new) 
+                    next_log_prob = (lp_new * mask).sum((1,2)).unsqueeze(-1)  # [B, 1]  
+
 
                     # compute approximate KL divergence
                     with torch.no_grad():
                         ratio = next_log_prob - sampled_log_prob
                         kl_divergence = ((torch.exp(ratio) - 1) - ratio).mean()
                         kl_divergences.append(kl_divergence)
+                        print(f"kl_divergence: {kl_divergence.item()}")
 
                     # early stopping with KL divergence
                     if self._kl_threshold and kl_divergence > self._kl_threshold:
+                        print(f"Early stopping with KL divergence: {kl_divergence.item()}")
                         break
 
                     # compute entropy loss
                     if self._entropy_loss_scale:
-                        entropy_loss = (
-                            -self._entropy_loss_scale
-                            * self.policy.get_entropy(role="policy").mean()
-                        )
+                        entropy_loss = -self._entropy_loss_scale * self.policy.get_entropy(role="policy").mean()
                     else:
                         entropy_loss = 0
 
@@ -516,21 +536,16 @@ class PPO(Agent):
                     )
 
                     policy_loss = -torch.min(surrogate, surrogate_clipped).mean()
+                    print(f"policy_loss: {policy_loss.item()}")
 
                     # compute value loss
-                    predicted_values, _, _ = self.value.act(
-                        {"states": sampled_states}, role="value"
-                    )
+                    predicted_values, _, _ = self.value.act({"states": sampled_states}, role="value")
 
                     if self._clip_predicted_values:
                         predicted_values = sampled_values + torch.clip(
-                            predicted_values - sampled_values,
-                            min=-self._value_clip,
-                            max=self._value_clip,
+                            predicted_values - sampled_values, min=-self._value_clip, max=self._value_clip
                         )
-                    value_loss = self._value_loss_scale * F.mse_loss(
-                        sampled_returns, predicted_values
-                    )
+                    value_loss = self._value_loss_scale * F.mse_loss(sampled_returns, predicted_values)
 
                 # optimization step
                 self.optimizer.zero_grad()
@@ -547,8 +562,7 @@ class PPO(Agent):
                         nn.utils.clip_grad_norm_(self.policy.parameters(), self._grad_norm_clip)
                     else:
                         nn.utils.clip_grad_norm_(
-                            itertools.chain(self.policy.parameters(), self.value.parameters()),
-                            self._grad_norm_clip,
+                            itertools.chain(self.policy.parameters(), self.value.parameters()), self._grad_norm_clip
                         )
 
                 self.scaler.step(self.optimizer)
@@ -575,34 +589,16 @@ class PPO(Agent):
                     self.scheduler.step()
 
         # record data
-        self.track_data(
-            "Loss / Policy loss",
-            cumulative_policy_loss / (self._learning_epochs * self._mini_batches),
-        )
-        self.track_data(
-            "Loss / Value loss",
-            cumulative_value_loss / (self._learning_epochs * self._mini_batches),
-        )
-        self.track_data(
-            "Value / Predicted values",
-            cumulative_values / (self._learning_epochs * self._mini_batches),
-        )
+        self.track_data("Loss / Policy loss", cumulative_policy_loss / (self._learning_epochs * self._mini_batches))
+        self.track_data("Loss / Value loss", cumulative_value_loss / (self._learning_epochs * self._mini_batches))
+        self.track_data("Value / Predicted values", cumulative_values / (self._learning_epochs * self._mini_batches))
         if self._entropy_loss_scale:
             self.track_data(
-                "Loss / Entropy loss",
-                cumulative_entropy_loss / (self._learning_epochs * self._mini_batches),
+                "Loss / Entropy loss", cumulative_entropy_loss / (self._learning_epochs * self._mini_batches)
             )
 
-        self.track_data(
-            "Policy / Standard deviation",
-            self.policy.distribution(role="policy").stddev.mean().item(),
-        )
-        self.track_data(
-            "Policy / KL divergence", torch.tensor(kl_divergences, device=self.device).mean().item()
-        )
-        self.track_data(
-            "Loss / Total loss",
-            (cumulative_entropy_loss + cumulative_policy_loss + cumulative_value_loss),
-        )
+        self.track_data("Policy / Standard deviation", self.policy.distribution(role="policy").stddev.mean().item())
+        self.track_data("Policy / KL divergence", torch.tensor(kl_divergences, device=self.device).mean().item())
+        self.track_data("Loss / Total loss", (cumulative_entropy_loss + cumulative_policy_loss + cumulative_value_loss))
         if self._learning_rate_scheduler:
             self.track_data("Learning / Learning rate", self.scheduler.get_last_lr()[0])

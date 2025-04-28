@@ -12,6 +12,7 @@ from skrl.envs.wrappers.torch import Wrapper
 from skrl.trainers.torch import Trainer
 
 
+
 # fmt: off
 # [start-config-dict-torch]
 PARALLEL_TRAINER_DEFAULT_CONFIG = {
